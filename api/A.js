@@ -1,4 +1,4 @@
-
+const serverless = require('serverless-http');
 const express = require('express');
 const bodyParser = require('body-parser');
 const fetch = require('node-fetch');
@@ -6,7 +6,6 @@ const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO_OWNER = 'hiplitewhat';
 const REPO_NAME = 'a';
@@ -16,6 +15,8 @@ app.use(bodyParser.json());
 app.use(express.urlencoded({ extended: true }));
 
 let notes = [];
+let notesCacheTimestamp = 0;
+const CACHE_TTL = 1000 * 60 * 5; // 5 minutes cache
 
 function isRobloxScript(content) {
   return content.includes('game') || content.includes('script');
@@ -31,14 +32,14 @@ async function obfuscate(content) {
 
     if (!res.ok) {
       console.warn('Obfuscation API error:', await res.text());
-      return content;  // fallback to original content on error
+      return content;
     }
 
     const data = await res.json();
-    return data.obfuscated || content;  // return obfuscated script or original
+    return data.obfuscated || content;
   } catch (err) {
     console.error('Obfuscation failed:', err);
-    return content;  // fallback to original content on error
+    return content;
   }
 }
 
@@ -97,12 +98,19 @@ async function loadNotesFromGithub() {
         id: file.name.replace('.txt', ''),
         title,
         content,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString() // You can improve this later
       });
     }
   }
 
-  console.log(`Loaded ${notes.length} notes from GitHub.`);
+  notesCacheTimestamp = Date.now();
+}
+
+async function getNotes() {
+  if (!notes.length || (Date.now() - notesCacheTimestamp > CACHE_TTL)) {
+    await loadNotesFromGithub();
+  }
+  return notes;
 }
 
 function renderHTML(noteList, sortOrder = 'desc') {
@@ -145,9 +153,10 @@ function renderHTML(noteList, sortOrder = 'desc') {
     </html>`;
 }
 
-app.get('/', (req, res) => {
+app.get('/', async (req, res) => {
   const sort = req.query.sort || 'desc';
-  res.send(renderHTML(notes, sort));
+  const allNotes = await getNotes();
+  res.send(renderHTML(allNotes, sort));
 });
 
 app.post('/notes', async (req, res) => {
@@ -194,6 +203,7 @@ app.post('/notes', async (req, res) => {
     createdAt: new Date().toISOString()
   };
 
+  // Push to local cache (optional, but kept for quick display)
   notes.push(note);
 
   try {
@@ -204,13 +214,14 @@ app.post('/notes', async (req, res) => {
   }
 });
 
-app.get('/notes/:id', (req, res) => {
+app.get('/notes/:id', async (req, res) => {
   const userAgent = req.get('User-Agent') || '';
   if (!userAgent.includes('Roblox')) {
     return res.status(403).send('Access denied');
   }
 
-  const note = notes.find(n => n.id === req.params.id);
+  const allNotes = await getNotes();
+  const note = allNotes.find(n => n.id === req.params.id);
   if (!note) return res.status(404).send('Not found');
 
   res.type('text/plain').send(note.content);
@@ -242,7 +253,5 @@ app.post('/filter', async (req, res) => {
   }
 });
 
-app.listen(PORT, async () => {
-  await loadNotesFromGithub();
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+module.exports = app;
+module.exports.handler = serverless(app);
